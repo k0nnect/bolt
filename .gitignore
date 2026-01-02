@@ -1,0 +1,35 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# Compiled files
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE files
+.vs/
+.vscode/
+*.vcxproj*
+*.sln
+.idea/
+*.user
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.cache
+
+# Python
+__pycache__/
+*.pyc
