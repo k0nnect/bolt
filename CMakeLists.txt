@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(bolt VERSION 1.0.0 LANGUAGES CXX)
+project(bolt VERSION 1.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,6 +75,8 @@ set(SOURCES
     src/downloadmanager.cpp
     src/downloaditem.cpp
     src/settings.cpp
+    src/torrentitem.cpp
+    src/torrentmanager.cpp
     ${IMGUI_SOURCES}
 )
 
@@ -83,7 +85,22 @@ set(HEADERS
     src/downloaditem.h
     src/settings.h
     src/resource.h
+    src/torrentitem.h
+    src/torrentmanager.h
 )
+
+# Optional libtorrent support
+option(BOLT_ENABLE_TORRENT "Enable torrent support via libtorrent" OFF)
+
+if(BOLT_ENABLE_TORRENT)
+    find_package(LibtorrentRasterbar CONFIG QUIET)
+    if(LibtorrentRasterbar_FOUND)
+        add_compile_definitions(BOLT_ENABLE_TORRENT)
+        message(STATUS "libtorrent found - torrent support enabled")
+    else()
+        message(WARNING "libtorrent not found - torrent support disabled")
+    endif()
+endif()
 
 # Windows resource file for application icon
 if(WIN32)
@@ -121,6 +138,11 @@ else()
     else()
         message(FATAL_ERROR "Could not find or build libcurl")
     endif()
+endif()
+
+# Link libtorrent if available
+if(BOLT_ENABLE_TORRENT AND LibtorrentRasterbar_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 endif()
 
 # OpenGL (platform-specific)

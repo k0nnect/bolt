@@ -267,8 +267,16 @@ int main(int, char**) {
     bool showLinkGrabber = false;
     bool showScheduler = false;
     bool showDetails = false;
+    bool showTorrents = false;
+    bool showAddTorrent = false;
     int detailsIndex = -1;
     int lastTheme = settings.theme;
+    
+    // Notification state
+    std::chrono::steady_clock::time_point clipboardNotificationTime;
+    bool clipboardNotificationActive = false;
+    const float notificationDuration = 8.0f;  // Auto-dismiss after 8 seconds
+    float notificationAlpha = 1.0f;
     
     // Main loop
     while (!glfwWindowShouldClose(window)) {
@@ -310,6 +318,9 @@ int main(int, char**) {
             if (ImGui::BeginMenu("file")) {
                 if (ImGui::MenuItem("add download", "Ctrl+N")) {
                     showAddDownload = true;
+                }
+                if (ImGui::MenuItem("add torrent", "Ctrl+T")) {
+                    showAddTorrent = true;
                 }
                 if (ImGui::MenuItem("batch import", "Ctrl+B")) {
                     showBatchImport = true;
@@ -396,6 +407,9 @@ int main(int, char**) {
             }
             
             if (ImGui::BeginMenu("tools")) {
+                if (ImGui::MenuItem("torrents...", "Ctrl+Shift+T")) {
+                    showTorrents = true;
+                }
                 if (ImGui::MenuItem("scheduler...")) {
                     showScheduler = true;
                 }
@@ -502,40 +516,91 @@ int main(int, char**) {
         downloadManager.renderHistoryPanel(&showHistory);
         downloadManager.renderLinkGrabberDialog(&showLinkGrabber);
         downloadManager.renderSchedulerPanel(&showScheduler);
+        downloadManager.renderTorrentPanel(&showTorrents);
+        downloadManager.renderAddTorrentDialog(&showAddTorrent);
         if (detailsIndex >= 0) {
             downloadManager.renderDownloadDetailsPanel(&showDetails, detailsIndex);
             if (!showDetails) detailsIndex = -1;
         }
         
-        // Clipboard notification popup
+        // Clipboard notification popup with auto-fade
         if (downloadManager.hasClipboardUrl()) {
-            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 420, io.DisplaySize.y - 140));
-            ImGui::SetNextWindowSize(ImVec2(400, 120));
-            ImGui::Begin("clipboard_popup", nullptr, 
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-            
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "url detected in clipboard");
-            ImGui::Spacing();
-            
-            std::string clipUrl = downloadManager.getClipboardUrl();
-            if (clipUrl.length() > 50) {
-                clipUrl = clipUrl.substr(0, 47) + "...";
+            // Start notification timer if new URL detected
+            if (!clipboardNotificationActive) {
+                clipboardNotificationActive = true;
+                clipboardNotificationTime = std::chrono::steady_clock::now();
+                notificationAlpha = 1.0f;
             }
-            ImGui::TextWrapped("%s", clipUrl.c_str());
             
-            ImGui::Spacing();
+            // Calculate time elapsed
+            auto now = std::chrono::steady_clock::now();
+            float elapsed = std::chrono::duration<float>(now - clipboardNotificationTime).count();
             
-            if (ImGui::Button("download", ImVec2(120, 32))) {
-                downloadManager.addDownload(downloadManager.getClipboardUrl());
+            // Auto-dismiss after duration
+            if (elapsed >= notificationDuration) {
                 downloadManager.clearClipboardUrl();
+                clipboardNotificationActive = false;
+            } else {
+                // Start fading out in the last 2 seconds
+                if (elapsed > notificationDuration - 2.0f) {
+                    notificationAlpha = (notificationDuration - elapsed) / 2.0f;
+                } else {
+                    notificationAlpha = 1.0f;
+                }
+                
+                // Apply alpha to window
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, notificationAlpha);
+                
+                ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 420, io.DisplaySize.y - 150));
+                ImGui::SetNextWindowSize(ImVec2(400, 130));
+                ImGui::Begin("clipboard_popup", nullptr, 
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
+                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+                
+                // Header with X button
+                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "url detected in clipboard");
+                
+                // X button on the right
+                ImGui::SameLine(ImGui::GetWindowWidth() - 35);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.2f, 0.2f, 0.7f));
+                if (ImGui::Button("X", ImVec2(25, 25))) {
+                    downloadManager.clearClipboardUrl();
+                    clipboardNotificationActive = false;
+                }
+                ImGui::PopStyleColor(3);
+                
+                ImGui::Spacing();
+                
+                std::string clipUrl = downloadManager.getClipboardUrl();
+                if (clipUrl.length() > 50) {
+                    clipUrl = clipUrl.substr(0, 47) + "...";
+                }
+                ImGui::TextWrapped("%s", clipUrl.c_str());
+                
+                ImGui::Spacing();
+                
+                if (ImGui::Button("download", ImVec2(120, 32))) {
+                    downloadManager.addDownload(downloadManager.getClipboardUrl());
+                    downloadManager.clearClipboardUrl();
+                    clipboardNotificationActive = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("dismiss", ImVec2(120, 32))) {
+                    downloadManager.clearClipboardUrl();
+                    clipboardNotificationActive = false;
+                }
+                
+                // Show countdown timer
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%.0fs", notificationDuration - elapsed);
+                
+                ImGui::End();
+                ImGui::PopStyleVar();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("dismiss", ImVec2(120, 32))) {
-                downloadManager.clearClipboardUrl();
-            }
-            
-            ImGui::End();
+        } else {
+            clipboardNotificationActive = false;
         }
 
         // About dialog
@@ -549,11 +614,11 @@ int main(int, char**) {
             ImGui::Spacing();
             
             // Center the title
-            float titleWidth = ImGui::CalcTextSize("bolt v1.0.0").x;
+            float titleWidth = ImGui::CalcTextSize("bolt v1.0.1").x;
             ImGui::SetCursorPosX((ImGui::GetWindowWidth() - titleWidth) / 2);
             ImGui::TextColored(ImVec4(0.45f, 0.72f, 1.0f, 1.0f), "bolt");
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "v1.0.0");
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "v1.0.1");
             
             ImGui::Spacing();
             
@@ -602,7 +667,7 @@ int main(int, char**) {
             
             // Features in compact format
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "features:");
-            ImGui::TextWrapped("http/https/ftp downloads, file categorization, speed limiting, clipboard monitoring, themes, queue management");
+            ImGui::TextWrapped("http/https/ftp downloads, torrent support, file categorization, speed limiting, clipboard monitoring, themes, queue management, show in folder");
             
             ImGui::Spacing();
             ImGui::Separator();

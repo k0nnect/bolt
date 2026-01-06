@@ -10,9 +10,15 @@
 #include <cmath>
 
 static size_t WriteFileCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-    std::ofstream* file = (std::ofstream*)userp;
+    std::ofstream* file = static_cast<std::ofstream*>(userp);
     size_t realsize = size * nmemb;
-    file->write((char*)contents, realsize);
+    if (file && file->is_open()) {
+        file->write(static_cast<char*>(contents), realsize);
+        file->flush();  // Ensure data is written to disk
+        if (file->fail()) {
+            return 0;  // Signal error to curl
+        }
+    }
     return realsize;
 }
 
@@ -209,13 +215,17 @@ void DownloadItem::cancel() {
     shouldPause = false;
     state = DownloadState::Cancelled;
     
-    if (file && file->is_open()) {
-        file->close();
+    if (outputFile && outputFile->is_open()) {
+        outputFile->close();
     }
     
     // Delete partial file
-    if (std::filesystem::exists(filePath)) {
-        std::filesystem::remove(filePath);
+    try {
+        if (std::filesystem::exists(filePath)) {
+            std::filesystem::remove(filePath);
+        }
+    } catch (...) {
+        // Ignore delete errors
     }
 }
 
@@ -227,31 +237,49 @@ void DownloadItem::downloadThread() {
         return;
     }
     
+    // Ensure the download directory exists
+    std::filesystem::path dirPath = std::filesystem::path(filePath).parent_path();
+    try {
+        if (!dirPath.empty() && !std::filesystem::exists(dirPath)) {
+            std::filesystem::create_directories(dirPath);
+        }
+    } catch (const std::exception& e) {
+        state = DownloadState::Error;
+        errorMessage = "cannot create directory: " + std::string(e.what());
+        curl_easy_cleanup(curl);
+        return;
+    }
+    
     // Check if file exists and get current size for resume
     uint64_t resumeFrom = 0;
     if (std::filesystem::exists(filePath)) {
-        resumeFrom = std::filesystem::file_size(filePath);
-        bytesReceived = resumeFrom;
-        lastBytesReceived = resumeFrom;
+        try {
+            resumeFrom = std::filesystem::file_size(filePath);
+            bytesReceived = resumeFrom;
+            lastBytesReceived = resumeFrom;
+        } catch (...) {
+            resumeFrom = 0;
+        }
     }
     
-    file = std::make_unique<std::fstream>(filePath, std::ios::out | std::ios::binary | std::ios::app);
-    if (!file->is_open()) {
+    // Open file for writing - use ofstream for clarity and reliability
+    outputFile = std::make_unique<std::ofstream>(filePath, std::ios::binary | std::ios::app);
+    if (!outputFile->is_open()) {
         state = DownloadState::Error;
-        errorMessage = "cannot open file for writing";
+        errorMessage = "cannot open file for writing: " + filePath;
         curl_easy_cleanup(curl);
         return;
     }
     
     if (resumeFrom > 0) {
-        file->seekp(resumeFrom);
+        outputFile->seekp(resumeFrom);
     }
     
     resumeOffset = resumeFrom;
     
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteFileCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, file.get());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, outputFile.get());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -337,8 +365,26 @@ void DownloadItem::downloadThread() {
         errorMessage = curl_easy_strerror(res);
     }
     
-    file->close();
+    // Ensure file is properly closed and flushed
+    if (outputFile && outputFile->is_open()) {
+        outputFile->flush();
+        outputFile->close();
+    }
     curl_easy_cleanup(curl);
+    
+    // Verify file was actually written
+    if (state == DownloadState::Completed) {
+        if (!std::filesystem::exists(filePath)) {
+            state = DownloadState::Error;
+            errorMessage = "file was not saved to disk";
+        } else {
+            uint64_t actualSize = std::filesystem::file_size(filePath);
+            if (bytesTotal > 0 && actualSize < bytesTotal) {
+                state = DownloadState::Error;
+                errorMessage = "incomplete download";
+            }
+        }
+    }
 }
 
 void DownloadItem::render(size_t index, bool compactMode) {
@@ -427,6 +473,8 @@ void DownloadItem::renderCompact(size_t index) {
             if (AutoBtn("pause", 24)) { pause(); }
         } else if (state == DownloadState::Error) {
             if (AutoBtn("retry", 24)) { retry(); }
+        } else if (state == DownloadState::Completed) {
+            if (AutoBtn("folder", 24)) { showInFolder(); }
         }
         
         ImGui::EndTable();
@@ -558,14 +606,16 @@ void DownloadItem::renderDetailed(size_t index) {
     ImGui::SameLine();
     
     // Open folder button
-    if (AutoBtn("open folder", 30)) {
-        std::string dir = std::filesystem::path(filePath).parent_path().string();
-#ifdef _WIN32
-        ShellExecuteA(NULL, "explore", dir.c_str(), NULL, NULL, SW_SHOWNORMAL);
-#else
-        std::string cmd = "xdg-open \"" + dir + "\"";
-        system(cmd.c_str());
-#endif
+    if (AutoBtn("show in folder", 30)) {
+        showInFolder();
+    }
+    
+    // Open file button (for completed downloads)
+    if (state == DownloadState::Completed) {
+        ImGui::SameLine();
+        if (AutoBtn("open file", 30)) {
+            openFile();
+        }
     }
     
     ImGui::EndChild();
@@ -631,6 +681,44 @@ std::string DownloadItem::getAddedDate() const {
     char buf[64];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", localtime(&time));
     return std::string(buf);
+}
+
+void DownloadItem::showInFolder() const {
+#ifdef _WIN32
+    // On Windows, use explorer with /select to highlight the file
+    // Convert forward slashes to backslashes for Windows
+    std::string windowsPath = filePath;
+    std::replace(windowsPath.begin(), windowsPath.end(), '/', '\\');
+    
+    // Make sure the path is absolute
+    std::filesystem::path absPath = std::filesystem::absolute(windowsPath);
+    std::string finalPath = absPath.string();
+    
+    std::string cmd = "/select,\"" + finalPath + "\"";
+    ShellExecuteA(NULL, "open", "explorer.exe", cmd.c_str(), NULL, SW_SHOWNORMAL);
+#elif __APPLE__
+    std::string cmd = "open -R \"" + filePath + "\"";
+    system(cmd.c_str());
+#else
+    std::string dir = std::filesystem::path(filePath).parent_path().string();
+    std::string cmd = "xdg-open \"" + dir + "\"";
+    system(cmd.c_str());
+#endif
+}
+
+void DownloadItem::openFile() const {
+    if (state != DownloadState::Completed) return;
+    if (!std::filesystem::exists(filePath)) return;
+    
+#ifdef _WIN32
+    ShellExecuteA(NULL, "open", filePath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif __APPLE__
+    std::string cmd = "open \"" + filePath + "\"";
+    system(cmd.c_str());
+#else
+    std::string cmd = "xdg-open \"" + filePath + "\"";
+    system(cmd.c_str());
+#endif
 }
 
 bool DownloadItem::verifyChecksum() {

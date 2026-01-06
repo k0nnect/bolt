@@ -70,6 +70,10 @@ public:
     bool isQueued() const { return state == DownloadState::Queued; }
     bool hasError() const { return state == DownloadState::Error; }
     
+    // File actions
+    void showInFolder() const;
+    void openFile() const;
+    
     void render(size_t index, bool compactMode = false);
     void renderCompact(size_t index);
     void renderDetailed(size_t index);
@@ -127,7 +131,7 @@ private:
     std::vector<std::unique_ptr<DownloadSegment>> segments;
     std::thread downloadThreadHandle;
     std::mutex fileMutex;
-    std::unique_ptr<std::fstream> file;
+    std::unique_ptr<std::ofstream> outputFile;
     
     std::atomic<uint64_t> bytesReceived{0};
     std::atomic<uint64_t> bytesTotal{0};

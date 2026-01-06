@@ -1,4 +1,5 @@
 #include "downloadmanager.h"
+#include "torrentmanager.h"
 #include "settings.h"
 #include "imgui.h"
 #include <algorithm>
@@ -19,11 +20,29 @@
 #include <shlobj.h>
 #include <knownfolders.h>
 #include <powrprof.h>
+#include <mmsystem.h>
 #pragma comment(lib, "PowrProf.lib")
+#pragma comment(lib, "winmm.lib")
 #else
 #include <pwd.h>
 #include <unistd.h>
 #endif
+
+// Helper function to play completion sound
+static void playCompletionSound() {
+    Settings& settings = Settings::getInstance();
+    if (!settings.playSoundOnComplete) return;
+    
+#ifdef _WIN32
+    if (settings.completionSoundPath.empty()) {
+        // Play system default notification sound
+        PlaySoundA("SystemAsterisk", NULL, SND_ALIAS | SND_ASYNC);
+    } else {
+        // Play custom sound file
+        PlaySoundA(settings.completionSoundPath.c_str(), NULL, SND_FILENAME | SND_ASYNC);
+    }
+#endif
+}
 
 DownloadManager::DownloadManager() 
     : maxConcurrentDownloads(Settings::getInstance().maxConcurrentDownloads)
@@ -333,12 +352,29 @@ std::vector<size_t> DownloadManager::getFilteredIndices() {
 
 void DownloadManager::processQueue() {
     activeDownloads = 0;
+    static std::set<std::string> notifiedCompleted;  // Track which downloads we've notified
+    
     for (auto& download : downloads) {
         if (download && download->isActive()) {
             activeDownloads++;
         }
+        
+        // Check for newly completed downloads
+        if (download && download->isCompleted()) {
+            std::string key = download->getUrl();
+            if (notifiedCompleted.find(key) == notifiedCompleted.end()) {
+                notifiedCompleted.insert(key);
+                
+                // Play completion sound
+                playCompletionSound();
+                
+                // Add to history
+                addToHistory(*download);
+            }
+        }
     }
     
+    // Start queued downloads
     for (auto& download : downloads) {
         if (download && download->isQueued() && 
             activeDownloads < maxConcurrentDownloads) {
@@ -761,10 +797,39 @@ void DownloadManager::renderSettingsPanel(bool* open) {
                 ImGui::SliderInt("speed limit (kb/s, 0=unlimited)", &settings.speedLimitKBps, 0, 10240);
                 
                 ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
                 
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "behavior:");
                 ImGui::Checkbox("auto-start downloads", &settings.autoStartDownloads);
                 ImGui::Checkbox("monitor clipboard for urls", &settings.clipboardMonitoring);
                 ImGui::Checkbox("show notifications", &settings.showNotifications);
+                ImGui::Checkbox("play sound on completion", &settings.playSoundOnComplete);
+                ImGui::Checkbox("auto-categorize files", &settings.autoCategorize);
+                
+                ImGui::EndTabItem();
+            }
+            
+            if (ImGui::BeginTabItem("connections")) {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "connection settings:");
+                ImGui::Spacing();
+                
+                ImGui::SliderInt("connections per download", &settings.connectionsPerDownload, 1, 16);
+                ImGui::SliderInt("connection timeout (sec)", &settings.connectionTimeout, 10, 120);
+                ImGui::SliderInt("retry attempts", &settings.retryAttempts, 0, 10);
+                ImGui::SliderInt("retry delay (sec)", &settings.retryDelay, 1, 60);
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "bandwidth allocation:");
+                ImGui::Checkbox("enable bandwidth allocation", &settings.enableBandwidthAllocation);
+                
+                if (settings.enableBandwidthAllocation) {
+                    const char* modes[] = { "equal distribution", "by priority" };
+                    ImGui::Combo("allocation mode", &settings.bandwidthAllocationMode, modes, 2);
+                }
                 
                 ImGui::EndTabItem();
             }
@@ -1811,6 +1876,60 @@ void DownloadManager::renderSchedulerPanel(bool* open) {
         }
     }
     ImGui::End();
+}
+
+void DownloadManager::renderTorrentPanel(bool* open) {
+    if (!*open) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("torrents", open)) {
+        // Torrent stats
+        const TorrentStats& stats = torrentManager.getStats();
+        
+        ImGui::Text("total: %d | downloading: %d | seeding: %d", 
+            stats.totalTorrents, stats.activeTorrents, stats.seedingTorrents);
+        
+        char speedBuf[128];
+        snprintf(speedBuf, sizeof(speedBuf), "D: %.2f kb/s | U: %.2f kb/s",
+            stats.downloadSpeed / 1024.0, stats.uploadSpeed / 1024.0);
+        ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(speedBuf).x - 20);
+        ImGui::Text("%s", speedBuf);
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        // Toolbar
+        static bool showAddTorrent = false;
+        if (ImGui::Button("add torrent", ImVec2(120, 32))) {
+            showAddTorrent = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("pause all", ImVec2(100, 32))) {
+            torrentManager.pauseAll();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("resume all", ImVec2(100, 32))) {
+            torrentManager.resumeAll();
+        }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        // Torrent list
+        ImGui::BeginChild("torrent_list", ImVec2(-1, -1), false);
+        torrentManager.render(Settings::getInstance().compactMode);
+        ImGui::EndChild();
+        
+        // Add torrent dialog
+        torrentManager.renderAddTorrentDialog(&showAddTorrent);
+    }
+    ImGui::End();
+}
+
+void DownloadManager::renderAddTorrentDialog(bool* open) {
+    torrentManager.renderAddTorrentDialog(open);
 }
 
 void DownloadManager::renderContextMenu(size_t index) {

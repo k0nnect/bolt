@@ -12,7 +12,7 @@ a minimalist download manager built with c++ and dear imgui.
 - clipboard monitoring with auto-detection of urls
 
 ### ui
-- clean, minimalist interface
+- clean, minimalist interface with lowercase aesthetic
 - multiple themes (dark, light, midnight blue, forest)
 - compact and detailed view modes
 - real-time speed graph
@@ -109,4 +109,4 @@ contributions are welcome! please feel free to submit a pull request.
 
 ## license
 
-MIT
+mit

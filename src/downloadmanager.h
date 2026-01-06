@@ -8,6 +8,7 @@
 #include <deque>
 #include <map>
 #include "downloaditem.h"
+#include "torrentmanager.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -109,6 +110,8 @@ public:
     void renderDownloadDetailsPanel(bool* open, size_t index);
     void renderSchedulerPanel(bool* open);
     void renderContextMenu(size_t index);
+    void renderTorrentPanel(bool* open);
+    void renderAddTorrentDialog(bool* open);
     
     // Statistics
     const DownloadStats& getStats() const { return stats; }
@@ -212,6 +215,11 @@ private:
     
     // Details panel state
     int detailsIndex = -1;
+    
+    // Torrent manager
+    TorrentManager torrentManager;
+public:
+    TorrentManager& getTorrentManager() { return torrentManager; }
 };
 
 #endif // DOWNLOADMANAGER_H

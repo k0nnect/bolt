@@ -51,6 +51,11 @@ struct Settings {
     bool showBalloonNotification = true;
     bool autoShutdown = false;
     int shutdownAction = 0;  // 0=shutdown, 1=sleep, 2=hibernate
+    std::string completionSoundPath = "";  // Empty = system default
+    
+    // Bandwidth allocation
+    bool enableBandwidthAllocation = false;
+    int bandwidthAllocationMode = 0;  // 0 = equal, 1 = by priority
     
     // Advanced
     int connectionsPerDownload = 4;  // Multi-segment
