@@ -2082,7 +2082,25 @@ void DownloadManager::handleDroppedUrls(const std::string& text) {
 // ============================================================================
 
 void DownloadManager::updateHourlyStats() {
+    static std::chrono::steady_clock::time_point lastSampleTime;
+    static bool firstCall = true;
     auto now = std::chrono::steady_clock::now();
+    
+    // Calculate time since last sample (for accurate byte counting)
+    double secondsSinceLastSample;
+    if (firstCall) {
+        // Use a reasonable default for the first sample (assume ~1 second interval)
+        secondsSinceLastSample = 1.0;
+        firstCall = false;
+    } else {
+        secondsSinceLastSample = std::chrono::duration<double>(now - lastSampleTime).count();
+        // Clamp to reasonable values (prevent huge jumps if app was paused)
+        if (secondsSinceLastSample > 5.0) secondsSinceLastSample = 1.0;
+        if (secondsSinceLastSample < 0.001) secondsSinceLastSample = 0.001; // Prevent division issues
+    }
+    lastSampleTime = now;
+    
+    // Check if we need to start a new hour
     auto elapsed = std::chrono::duration_cast<std::chrono::hours>(now - stats.lastHourUpdate);
     
     if (elapsed.count() >= 1 || stats.lastHourUpdate == std::chrono::steady_clock::time_point{}) {
@@ -2112,12 +2130,18 @@ void DownloadManager::updateHourlyStats() {
         stats.lastHourUpdate = now;
     }
     
-    // Update current hour
-    stats.currentHourBytes += static_cast<uint64_t>(stats.currentTotalSpeed);
-    stats.currentHourTotalSpeed += static_cast<float>(stats.currentTotalSpeed);
-    stats.currentHourSpeedSamples++;
-    if (stats.currentTotalSpeed > stats.currentHourPeakSpeed) {
-        stats.currentHourPeakSpeed = static_cast<float>(stats.currentTotalSpeed);
+    // Update current hour - only count samples with valid time intervals
+    if (secondsSinceLastSample > 0) {
+        // Calculate actual bytes: speed (bytes/sec) * time (seconds)
+        if (stats.currentTotalSpeed > 0) {
+            stats.currentHourBytes += static_cast<uint64_t>(stats.currentTotalSpeed * secondsSinceLastSample);
+        }
+        // Only count speed samples when we have a valid time interval
+        stats.currentHourTotalSpeed += static_cast<float>(stats.currentTotalSpeed);
+        stats.currentHourSpeedSamples++;
+        if (stats.currentTotalSpeed > stats.currentHourPeakSpeed) {
+            stats.currentHourPeakSpeed = static_cast<float>(stats.currentTotalSpeed);
+        }
     }
 }
 

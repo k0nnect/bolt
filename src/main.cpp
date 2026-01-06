@@ -329,6 +329,26 @@ int main(int, char**) {
         // Handle keyboard shortcuts
         downloadManager.handleKeyboardShortcuts();
         
+        // Additional shortcuts for UI state (handled here because they control local variables)
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) {
+            showStatsDashboard = !showStatsDashboard;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N)) {
+            showAddDownload = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T)) {
+            showAddTorrent = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) {
+            showBatchImport = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G)) {
+            showLinkGrabber = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_H)) {
+            showHistory = true;
+        }
+        
         // Menu bar
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("file")) {
@@ -448,8 +468,8 @@ int main(int, char**) {
                     settings.save();
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("statistics dashboard", "Ctrl+D")) {
-                    showStatsDashboard = true;
+                if (ImGui::MenuItem("statistics dashboard", "Ctrl+D", showStatsDashboard)) {
+                    showStatsDashboard = !showStatsDashboard;
                 }
                 ImGui::EndMenu();
             }
