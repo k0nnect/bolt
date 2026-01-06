@@ -49,6 +49,8 @@ DownloadManager::DownloadManager()
     , activeDownloads(0)
 {
     loadHistory();
+    loadDashboardStats();
+    stats.sessionStart = std::chrono::steady_clock::now();
 }
 
 DownloadManager::~DownloadManager() {
@@ -1046,6 +1048,9 @@ void DownloadManager::addToHistory(const DownloadItem& item) {
     stats.allTimeBytesDownloaded += entry.fileSize;
     stats.allTimeDownloadsCompleted++;
     
+    // Record for dashboard statistics
+    recordDownloadCompletion(item);
+    
     saveHistory();
 }
 
@@ -2014,4 +2019,578 @@ void DownloadManager::renderContextMenu(size_t index) {
         
         ImGui::EndPopup();
     }
+}
+
+// ============================================================================
+// DRAG & DROP SUPPORT
+// ============================================================================
+
+void DownloadManager::handleDroppedFiles(int count, const char** paths) {
+    for (int i = 0; i < count; i++) {
+        std::string path = paths[i];
+        
+        // Check if it's a .torrent file
+        if (path.size() > 8 && path.substr(path.size() - 8) == ".torrent") {
+            // Handle torrent file
+            torrentManager.addTorrent(path);
+            continue;
+        }
+        
+        // Check if it's a text file with URLs
+        if (path.size() > 4 && (path.substr(path.size() - 4) == ".txt" || 
+                                 path.substr(path.size() - 4) == ".url")) {
+            std::ifstream file(path);
+            if (file.is_open()) {
+                std::string line;
+                while (std::getline(file, line)) {
+                    // Trim whitespace
+                    line.erase(0, line.find_first_not_of(" \t\r\n"));
+                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                    
+                    if (!line.empty() && isValidUrl(line)) {
+                        addDownload(line);
+                    }
+                }
+                file.close();
+            }
+            continue;
+        }
+        
+        // Check if the path itself is a URL (from browser drag)
+        if (isValidUrl(path)) {
+            addDownload(path);
+        }
+    }
+}
+
+void DownloadManager::handleDroppedUrls(const std::string& text) {
+    // Parse text for URLs
+    std::regex urlRegex(R"((https?|ftp)://[^\s<>"{}|\\^`\[\]]+)", std::regex::icase);
+    std::sregex_iterator begin(text.begin(), text.end(), urlRegex);
+    std::sregex_iterator end;
+    
+    for (auto it = begin; it != end; ++it) {
+        std::string url = it->str();
+        if (isValidUrl(url)) {
+            addDownload(url);
+        }
+    }
+}
+
+// ============================================================================
+// STATISTICS DASHBOARD
+// ============================================================================
+
+void DownloadManager::updateHourlyStats() {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::hours>(now - stats.lastHourUpdate);
+    
+    if (elapsed.count() >= 1 || stats.lastHourUpdate == std::chrono::steady_clock::time_point{}) {
+        // Save current hour's data
+        if (stats.lastHourUpdate != std::chrono::steady_clock::time_point{}) {
+            stats.hourlyBytesHistory.push_back(stats.currentHourBytes);
+            if (stats.currentHourSpeedSamples > 0) {
+                stats.hourlySpeedHistory.push_back(stats.currentHourTotalSpeed / stats.currentHourSpeedSamples);
+            } else {
+                stats.hourlySpeedHistory.push_back(0);
+            }
+            
+            // Keep only last 24 hours
+            while (stats.hourlyBytesHistory.size() > 24) {
+                stats.hourlyBytesHistory.pop_front();
+            }
+            while (stats.hourlySpeedHistory.size() > 24) {
+                stats.hourlySpeedHistory.pop_front();
+            }
+        }
+        
+        // Reset for new hour
+        stats.currentHourBytes = 0;
+        stats.currentHourPeakSpeed = 0;
+        stats.currentHourTotalSpeed = 0;
+        stats.currentHourSpeedSamples = 0;
+        stats.lastHourUpdate = now;
+    }
+    
+    // Update current hour
+    stats.currentHourBytes += static_cast<uint64_t>(stats.currentTotalSpeed);
+    stats.currentHourTotalSpeed += static_cast<float>(stats.currentTotalSpeed);
+    stats.currentHourSpeedSamples++;
+    if (stats.currentTotalSpeed > stats.currentHourPeakSpeed) {
+        stats.currentHourPeakSpeed = static_cast<float>(stats.currentTotalSpeed);
+    }
+}
+
+void DownloadManager::recordDownloadCompletion(const DownloadItem& item) {
+    // Update category stats
+    FileCategory cat = item.getCategory();
+    stats.categoryCount[cat]++;
+    stats.categoryBytes[cat] += item.getBytesTotal();
+    
+    // Update daily stats
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    char dateBuffer[11];
+    std::strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", std::localtime(&time_t_now));
+    std::string today(dateBuffer);
+    
+    // Find or create today's entry
+    bool found = false;
+    for (auto& daily : stats.dailyHistory) {
+        if (daily.date == today) {
+            daily.bytesDownloaded += item.getBytesTotal();
+            daily.downloadsCompleted++;
+            found = true;
+            break;
+        }
+    }
+    
+    if (!found) {
+        DailyStats newDay;
+        newDay.date = today;
+        newDay.bytesDownloaded = item.getBytesTotal();
+        newDay.downloadsCompleted = 1;
+        stats.dailyHistory.push_back(newDay);
+        
+        // Keep only last 30 days
+        while (stats.dailyHistory.size() > 30) {
+            stats.dailyHistory.erase(stats.dailyHistory.begin());
+        }
+    }
+    
+    saveDashboardStats();
+}
+
+void DownloadManager::loadDashboardStats() {
+    std::string path = Settings::getInstance().downloadPath + "/bolt_dashboard_stats.dat";
+    std::ifstream file(path);
+    if (!file.is_open()) return;
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string type;
+        iss >> type;
+        
+        if (type == "DAILY") {
+            DailyStats day;
+            iss >> day.date >> day.bytesDownloaded >> day.downloadsCompleted >> day.peakSpeed >> day.averageSpeed;
+            stats.dailyHistory.push_back(day);
+        } else if (type == "CATEGORY_COUNT") {
+            int cat;
+            int count;
+            iss >> cat >> count;
+            stats.categoryCount[static_cast<FileCategory>(cat)] = count;
+        } else if (type == "CATEGORY_BYTES") {
+            int cat;
+            uint64_t bytes;
+            iss >> cat >> bytes;
+            stats.categoryBytes[static_cast<FileCategory>(cat)] = bytes;
+        } else if (type == "ALLTIME") {
+            iss >> stats.allTimeBytesDownloaded >> stats.allTimeDownloadsCompleted;
+        }
+    }
+    
+    file.close();
+}
+
+void DownloadManager::saveDashboardStats() {
+    std::string path = Settings::getInstance().downloadPath + "/bolt_dashboard_stats.dat";
+    std::ofstream file(path);
+    if (!file.is_open()) return;
+    
+    file << "ALLTIME " << stats.allTimeBytesDownloaded << " " << stats.allTimeDownloadsCompleted << "\n";
+    
+    for (const auto& day : stats.dailyHistory) {
+        file << "DAILY " << day.date << " " << day.bytesDownloaded << " " 
+             << day.downloadsCompleted << " " << day.peakSpeed << " " << day.averageSpeed << "\n";
+    }
+    
+    for (const auto& [cat, count] : stats.categoryCount) {
+        file << "CATEGORY_COUNT " << static_cast<int>(cat) << " " << count << "\n";
+    }
+    
+    for (const auto& [cat, bytes] : stats.categoryBytes) {
+        file << "CATEGORY_BYTES " << static_cast<int>(cat) << " " << bytes << "\n";
+    }
+    
+    file.close();
+}
+
+void DownloadManager::renderStatisticsDashboard(bool* open) {
+    if (!open || !*open) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(900, 700), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("statistics dashboard", open, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+    
+    // Tab bar for different views
+    if (ImGui::BeginTabBar("StatsTabs")) {
+        // Overview Tab
+        if (ImGui::BeginTabItem("overview")) {
+            ImGui::Spacing();
+            
+            // Summary cards
+            float cardWidth = (ImGui::GetContentRegionAvail().x - 30) / 4;
+            
+            // Total Downloads Card
+            ImGui::BeginChild("card1", ImVec2(cardWidth, 100), true);
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "total downloads");
+            ImGui::SetWindowFontScale(2.0f);
+            ImGui::Text("%d", stats.allTimeDownloadsCompleted);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "all time");
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
+            // Total Data Card
+            ImGui::BeginChild("card2", ImVec2(cardWidth, 100), true);
+            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "data downloaded");
+            ImGui::SetWindowFontScale(1.5f);
+            auto formatSize = [](uint64_t bytes) -> std::string {
+                if (bytes >= 1099511627776ULL) return std::to_string(bytes / 1099511627776ULL) + " TB";
+                if (bytes >= 1073741824ULL) return std::to_string(bytes / 1073741824ULL) + " GB";
+                if (bytes >= 1048576ULL) return std::to_string(bytes / 1048576ULL) + " MB";
+                return std::to_string(bytes / 1024ULL) + " KB";
+            };
+            ImGui::Text("%s", formatSize(stats.allTimeBytesDownloaded).c_str());
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "all time");
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
+            // Session Downloads Card
+            ImGui::BeginChild("card3", ImVec2(cardWidth, 100), true);
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "session downloads");
+            ImGui::SetWindowFontScale(2.0f);
+            ImGui::Text("%d", stats.sessionDownloadsCompleted);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "this session");
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
+            // Peak Speed Card
+            ImGui::BeginChild("card4", ImVec2(cardWidth, 100), true);
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "peak speed");
+            ImGui::SetWindowFontScale(1.5f);
+            if (stats.peakSpeed >= 1048576) {
+                ImGui::Text("%.1f MB/s", stats.peakSpeed / 1048576.0);
+            } else {
+                ImGui::Text("%.1f KB/s", stats.peakSpeed / 1024.0);
+            }
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "all time");
+            ImGui::EndChild();
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            // Speed Graph (last 24 hours)
+            ImGui::Text("bandwidth usage (last 24 hours)");
+            ImGui::Spacing();
+            
+            if (!stats.hourlySpeedHistory.empty()) {
+                std::vector<float> speedData(stats.hourlySpeedHistory.begin(), stats.hourlySpeedHistory.end());
+                float maxSpeed = *std::max_element(speedData.begin(), speedData.end());
+                if (maxSpeed < 1) maxSpeed = 1;
+                
+                ImGui::PlotLines("##hourlyspeed", speedData.data(), (int)speedData.size(), 0,
+                    nullptr, 0, maxSpeed * 1.1f, ImVec2(ImGui::GetContentRegionAvail().x, 150));
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "no hourly data yet - keep downloading!");
+            }
+            
+            ImGui::EndTabItem();
+        }
+        
+        // Daily History Tab
+        if (ImGui::BeginTabItem("daily history")) {
+            ImGui::Spacing();
+            
+            if (stats.dailyHistory.empty()) {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "no daily history yet");
+            } else {
+                // Bar chart of daily downloads
+                ImGui::Text("downloads per day (last 30 days)");
+                ImGui::Spacing();
+                
+                std::vector<float> dailyData;
+                std::vector<std::string> labels;
+                uint64_t maxBytes = 0;
+                
+                for (const auto& day : stats.dailyHistory) {
+                    dailyData.push_back(static_cast<float>(day.bytesDownloaded));
+                    labels.push_back(day.date.substr(5)); // MM-DD
+                    if (day.bytesDownloaded > maxBytes) maxBytes = day.bytesDownloaded;
+                }
+                
+                // Draw custom bar chart
+                ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+                ImVec2 canvasSize(ImGui::GetContentRegionAvail().x, 200);
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+                
+                drawList->AddRectFilled(canvasPos, 
+                    ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
+                    IM_COL32(30, 30, 35, 255));
+                
+                if (!dailyData.empty() && maxBytes > 0) {
+                    float barWidth = canvasSize.x / dailyData.size() - 4;
+                    for (size_t i = 0; i < dailyData.size(); i++) {
+                        float barHeight = (dailyData[i] / maxBytes) * (canvasSize.y - 20);
+                        float x = canvasPos.x + i * (barWidth + 4) + 2;
+                        float y = canvasPos.y + canvasSize.y - barHeight - 10;
+                        
+                        // Gradient color based on height
+                        ImU32 color = IM_COL32(
+                            (int)(100 + 155 * (dailyData[i] / maxBytes)),
+                            (int)(150 + 50 * (dailyData[i] / maxBytes)),
+                            255, 255);
+                        
+                        drawList->AddRectFilled(
+                            ImVec2(x, y),
+                            ImVec2(x + barWidth, canvasPos.y + canvasSize.y - 10),
+                            color, 3.0f);
+                    }
+                }
+                
+                ImGui::Dummy(canvasSize);
+                
+                // Table with details
+                ImGui::Spacing();
+                if (ImGui::BeginTable("dailyTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("date", ImGuiTableColumnFlags_WidthFixed, 120);
+                    ImGui::TableSetupColumn("downloads", ImGuiTableColumnFlags_WidthFixed, 100);
+                    ImGui::TableSetupColumn("data", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("avg speed", ImGuiTableColumnFlags_WidthFixed, 120);
+                    ImGui::TableHeadersRow();
+                    
+                    // Show in reverse order (most recent first)
+                    for (int i = (int)stats.dailyHistory.size() - 1; i >= 0; i--) {
+                        const auto& day = stats.dailyHistory[i];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%s", day.date.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%d", day.downloadsCompleted);
+                        ImGui::TableNextColumn();
+                        auto formatSize = [](uint64_t bytes) -> std::string {
+                            if (bytes >= 1073741824ULL) return std::to_string(bytes / 1073741824ULL) + " GB";
+                            if (bytes >= 1048576ULL) return std::to_string(bytes / 1048576ULL) + " MB";
+                            return std::to_string(bytes / 1024ULL) + " KB";
+                        };
+                        ImGui::Text("%s", formatSize(day.bytesDownloaded).c_str());
+                        ImGui::TableNextColumn();
+                        if (day.averageSpeed >= 1048576) {
+                            ImGui::Text("%.1f MB/s", day.averageSpeed / 1048576.0);
+                        } else {
+                            ImGui::Text("%.1f KB/s", day.averageSpeed / 1024.0);
+                        }
+                    }
+                    
+                    ImGui::EndTable();
+                }
+            }
+            
+            ImGui::EndTabItem();
+        }
+        
+        // Categories Tab
+        if (ImGui::BeginTabItem("categories")) {
+            ImGui::Spacing();
+            
+            auto getCategoryName = [](FileCategory cat) -> const char* {
+                switch (cat) {
+                    case FileCategory::Video: return "videos";
+                    case FileCategory::Audio: return "audio";
+                    case FileCategory::Document: return "documents";
+                    case FileCategory::Archive: return "archives";
+                    case FileCategory::Program: return "programs";
+                    case FileCategory::Image: return "images";
+                    default: return "other";
+                }
+            };
+            
+            auto getCategoryColor = [](FileCategory cat) -> ImVec4 {
+                switch (cat) {
+                    case FileCategory::Video: return ImVec4(0.9f, 0.4f, 0.4f, 1.0f);
+                    case FileCategory::Audio: return ImVec4(0.4f, 0.9f, 0.4f, 1.0f);
+                    case FileCategory::Document: return ImVec4(0.4f, 0.6f, 0.9f, 1.0f);
+                    case FileCategory::Archive: return ImVec4(0.9f, 0.7f, 0.3f, 1.0f);
+                    case FileCategory::Program: return ImVec4(0.7f, 0.4f, 0.9f, 1.0f);
+                    case FileCategory::Image: return ImVec4(0.3f, 0.9f, 0.9f, 1.0f);
+                    default: return ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                }
+            };
+            
+            // Pie chart visualization (simple version using colored rectangles)
+            uint64_t totalBytes = 0;
+            int totalCount = 0;
+            for (const auto& [cat, bytes] : stats.categoryBytes) {
+                totalBytes += bytes;
+            }
+            for (const auto& [cat, count] : stats.categoryCount) {
+                totalCount += count;
+            }
+            
+            ImGui::Text("downloads by category");
+            ImGui::Spacing();
+            
+            // Visual bar representation
+            float barHeight = 30;
+            ImVec2 barStart = ImGui::GetCursorScreenPos();
+            float barWidth = ImGui::GetContentRegionAvail().x;
+            
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            float currentX = barStart.x;
+            
+            if (totalBytes > 0) {
+                for (int i = 0; i <= (int)FileCategory::Other; i++) {
+                    FileCategory cat = static_cast<FileCategory>(i);
+                    auto it = stats.categoryBytes.find(cat);
+                    if (it != stats.categoryBytes.end() && it->second > 0) {
+                        float segmentWidth = (float)it->second / totalBytes * barWidth;
+                        ImVec4 col = getCategoryColor(cat);
+                        drawList->AddRectFilled(
+                            ImVec2(currentX, barStart.y),
+                            ImVec2(currentX + segmentWidth, barStart.y + barHeight),
+                            ImGui::ColorConvertFloat4ToU32(col));
+                        currentX += segmentWidth;
+                    }
+                }
+            } else {
+                drawList->AddRectFilled(barStart, 
+                    ImVec2(barStart.x + barWidth, barStart.y + barHeight),
+                    IM_COL32(50, 50, 55, 255));
+            }
+            
+            ImGui::Dummy(ImVec2(barWidth, barHeight + 10));
+            ImGui::Spacing();
+            
+            // Legend and details
+            if (ImGui::BeginTable("categoryTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("category", ImGuiTableColumnFlags_WidthFixed, 150);
+                ImGui::TableSetupColumn("count", ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableSetupColumn("data", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("percentage", ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableHeadersRow();
+                
+                for (int i = 0; i <= (int)FileCategory::Other; i++) {
+                    FileCategory cat = static_cast<FileCategory>(i);
+                    int count = 0;
+                    uint64_t bytes = 0;
+                    
+                    auto countIt = stats.categoryCount.find(cat);
+                    if (countIt != stats.categoryCount.end()) count = countIt->second;
+                    
+                    auto bytesIt = stats.categoryBytes.find(cat);
+                    if (bytesIt != stats.categoryBytes.end()) bytes = bytesIt->second;
+                    
+                    if (count == 0 && bytes == 0) continue;
+                    
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    
+                    // Color indicator
+                    ImVec4 col = getCategoryColor(cat);
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    drawList->AddRectFilled(p, ImVec2(p.x + 12, p.y + 12), 
+                        ImGui::ColorConvertFloat4ToU32(col), 2.0f);
+                    ImGui::Dummy(ImVec2(16, 0));
+                    ImGui::SameLine();
+                    ImGui::Text("%s", getCategoryName(cat));
+                    
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", count);
+                    
+                    ImGui::TableNextColumn();
+                    auto formatSize = [](uint64_t bytes) -> std::string {
+                        if (bytes >= 1073741824ULL) return std::to_string(bytes / 1073741824ULL) + " GB";
+                        if (bytes >= 1048576ULL) return std::to_string(bytes / 1048576ULL) + " MB";
+                        return std::to_string(bytes / 1024ULL) + " KB";
+                    };
+                    ImGui::Text("%s", formatSize(bytes).c_str());
+                    
+                    ImGui::TableNextColumn();
+                    if (totalBytes > 0) {
+                        ImGui::Text("%.1f%%", (float)bytes / totalBytes * 100);
+                    } else {
+                        ImGui::Text("0%%");
+                    }
+                }
+                
+                ImGui::EndTable();
+            }
+            
+            ImGui::EndTabItem();
+        }
+        
+        // Live Monitor Tab
+        if (ImGui::BeginTabItem("live monitor")) {
+            ImGui::Spacing();
+            
+            // Current speed
+            ImGui::Text("current speed:");
+            ImGui::SameLine();
+            if (stats.currentTotalSpeed >= 1048576) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%.2f MB/s", 
+                    stats.currentTotalSpeed / 1048576.0);
+            } else {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%.2f KB/s", 
+                    stats.currentTotalSpeed / 1024.0);
+            }
+            
+            ImGui::SameLine(300);
+            ImGui::Text("active downloads: %d", activeDownloads);
+            
+            ImGui::Spacing();
+            
+            // Real-time speed graph
+            ImGui::Text("real-time bandwidth");
+            if (!stats.speedHistory.empty()) {
+                std::vector<float> speedData(stats.speedHistory.begin(), stats.speedHistory.end());
+                float maxSpeed = *std::max_element(speedData.begin(), speedData.end());
+                if (maxSpeed < 1024) maxSpeed = 1024;
+                
+                ImGui::PlotLines("##realtimespeed", speedData.data(), (int)speedData.size(), 0,
+                    nullptr, 0, maxSpeed * 1.1f, ImVec2(ImGui::GetContentRegionAvail().x, 200));
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            // Active downloads list
+            ImGui::Text("active downloads:");
+            ImGui::Spacing();
+            
+            for (size_t i = 0; i < downloads.size(); i++) {
+                auto& dl = downloads[i];
+                if (dl->isActive()) {
+                    ImGui::PushID((int)i);
+                    
+                    // Progress bar with speed
+                    float progress = static_cast<float>(dl->getProgress() / 100.0);
+                    char overlay[128];
+                    snprintf(overlay, sizeof(overlay), "%s - %.1f%% (%.1f KB/s)", 
+                        dl->getFileName().c_str(), dl->getProgress(), dl->getCurrentSpeed() / 1024.0);
+                    
+                    ImGui::ProgressBar(progress, ImVec2(-1, 25), overlay);
+                    
+                    ImGui::PopID();
+                }
+            }
+            
+            ImGui::EndTabItem();
+        }
+        
+        ImGui::EndTabBar();
+    }
+    
+    ImGui::End();
 }

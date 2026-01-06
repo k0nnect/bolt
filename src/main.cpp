@@ -13,11 +13,22 @@
 #include <chrono>
 #include <cstring>
 #include <cctype>
+#include <fstream>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
 #endif
+
+// Global pointer for drag & drop callback
+static DownloadManager* g_downloadManager = nullptr;
+
+// GLFW drag & drop callback
+void dropCallback(GLFWwindow* window, int count, const char** paths) {
+    if (g_downloadManager && count > 0) {
+        g_downloadManager->handleDroppedFiles(count, paths);
+    }
+}
 
 // Draw lightning bolt logo
 void drawLightningBolt(ImDrawList* drawList, ImVec2 pos, float size, ImU32 color) {
@@ -256,6 +267,10 @@ int main(int, char**) {
 
     // Create download manager
     DownloadManager downloadManager;
+    g_downloadManager = &downloadManager;  // Set global pointer for drop callback
+    
+    // Set up drag & drop callback
+    glfwSetDropCallback(window, dropCallback);
 
     // UI State
     char urlBuffer[4096] = "";
@@ -269,6 +284,7 @@ int main(int, char**) {
     bool showDetails = false;
     bool showTorrents = false;
     bool showAddTorrent = false;
+    bool showStatsDashboard = false;
     int detailsIndex = -1;
     int lastTheme = settings.theme;
     
@@ -431,6 +447,10 @@ int main(int, char**) {
                 if (ImGui::MenuItem("show speed graph", nullptr, &settings.showSpeedGraph)) {
                     settings.save();
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("statistics dashboard", "Ctrl+D")) {
+                    showStatsDashboard = true;
+                }
                 ImGui::EndMenu();
             }
             
@@ -518,6 +538,7 @@ int main(int, char**) {
         downloadManager.renderSchedulerPanel(&showScheduler);
         downloadManager.renderTorrentPanel(&showTorrents);
         downloadManager.renderAddTorrentDialog(&showAddTorrent);
+        downloadManager.renderStatisticsDashboard(&showStatsDashboard);
         if (detailsIndex >= 0) {
             downloadManager.renderDownloadDetailsPanel(&showDetails, detailsIndex);
             if (!showDetails) detailsIndex = -1;

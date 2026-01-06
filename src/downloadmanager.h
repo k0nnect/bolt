@@ -16,6 +16,14 @@
 #include <comdef.h>
 #endif
 
+struct DailyStats {
+    std::string date;
+    uint64_t bytesDownloaded = 0;
+    int downloadsCompleted = 0;
+    double peakSpeed = 0.0;
+    double averageSpeed = 0.0;
+};
+
 struct DownloadStats {
     uint64_t totalBytesDownloaded = 0;
     uint64_t sessionBytesDownloaded = 0;
@@ -23,13 +31,25 @@ struct DownloadStats {
     int sessionDownloadsCompleted = 0;
     double currentTotalSpeed = 0.0;
     double peakSpeed = 0.0;
-    std::deque<float> speedHistory;  // For graph
+    std::deque<float> speedHistory;  // For graph (last 60 samples for mini graph)
     
     // Extended stats
     uint64_t allTimeBytesDownloaded = 0;
     int allTimeDownloadsCompleted = 0;
     double averageSpeed = 0.0;
     std::chrono::steady_clock::time_point sessionStart;
+    
+    // Dashboard stats
+    std::deque<float> hourlySpeedHistory;      // Last 24 hours of speed data
+    std::deque<uint64_t> hourlyBytesHistory;   // Bytes per hour for last 24 hours
+    std::vector<DailyStats> dailyHistory;      // Last 30 days of stats
+    std::map<FileCategory, int> categoryCount; // Downloads by category
+    std::map<FileCategory, uint64_t> categoryBytes; // Bytes by category
+    std::chrono::steady_clock::time_point lastHourUpdate;
+    uint64_t currentHourBytes = 0;
+    float currentHourPeakSpeed = 0.0f;
+    float currentHourTotalSpeed = 0.0f;
+    int currentHourSpeedSamples = 0;
 };
 
 struct HistoryEntry {
@@ -112,6 +132,7 @@ public:
     void renderContextMenu(size_t index);
     void renderTorrentPanel(bool* open);
     void renderAddTorrentDialog(bool* open);
+    void renderStatisticsDashboard(bool* open);  // Full statistics dashboard
     
     // Statistics
     const DownloadStats& getStats() const { return stats; }
@@ -169,6 +190,16 @@ public:
     
     // Verification
     void verifyAllChecksums();
+    
+    // Drag & Drop
+    void handleDroppedFiles(int count, const char** paths);
+    void handleDroppedUrls(const std::string& text);
+    
+    // Statistics dashboard
+    void updateHourlyStats();
+    void loadDashboardStats();
+    void saveDashboardStats();
+    void recordDownloadCompletion(const DownloadItem& item);
 
 private:
     std::vector<std::unique_ptr<DownloadItem>> downloads;
